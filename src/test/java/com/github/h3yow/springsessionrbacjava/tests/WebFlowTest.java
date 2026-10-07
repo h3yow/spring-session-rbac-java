@@ -80,7 +80,8 @@ class WebFlowTest {
                 .andExpect(status().isUnauthorized())
                 .andReturn();
         log.info("after logout: body={}", after.getResponse().getContentAsString());
-        assertTrue(after.getResponse().getContentAsString().contains("SESSION_MISSING"));
+        assertTrue(after.getResponse().getContentAsString().contains("SESSION_REVOKED"),
+                "本人主动注销在墓碑保留期内原因可分辨");
     }
 
     @Test

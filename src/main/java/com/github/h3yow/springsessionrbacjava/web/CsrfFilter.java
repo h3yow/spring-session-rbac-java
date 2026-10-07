@@ -50,9 +50,19 @@ public class CsrfFilter extends OncePerRequestFilter {
         String expected = sessionStore.find(sessionId)
                 .map(com.github.h3yow.springsessionrbacjava.session.SessionRecord::csrfToken)
                 .orElse(null);
-        if (expected == null) {
-            // 会话已注销/不存在（如并发重复注销）：交由下游认证逻辑统一处理，
+        com.github.h3yow.springsessionrbacjava.session.SessionRecord record =
+                sessionStore.find(sessionId).orElse(null);
+        if (expected == null || record == null) {
+            // 会话不存在（如并发重复注销、伪造 ID）：交由下游认证逻辑统一处理，
             // 保证重复提交得到稳定结果而非 CSRF 错误。
+            chain.doFilter(request, response);
+            return;
+        }
+        if (record.isRevoked() || record.isExpired(java.time.Instant.now())) {
+            // 已下线（含被挤掉）/已过期会话不再校验 CSRF，放行给下游认证逻辑，
+            // 使"为什么被登出"在状态变更入口上与资源访问、续期入口结论一致。
+            log.info("dead session skips csrf: path={}, sessionId={}",
+                    request.getRequestURI(), sessionId);
             chain.doFilter(request, response);
             return;
         }

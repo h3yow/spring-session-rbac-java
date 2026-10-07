@@ -63,15 +63,23 @@ public class AuthService {
         }
         boolean renewed = sessionStore.renew(sessionId, properties.getSessionTtlSeconds());
         if (!renewed) {
-            // 并发下会话刚被注销或过期：回滚到一致状态，报稳定错误。
-            return AuthResult.fail(AuthFailureReason.SESSION_REVOKED);
+            // 并发下会话刚被下线或刚过期：重新解析以拿到与其他入口一致的真实原因。
+            log.info("renew race: sessionId={}, re-resolving", sessionId);
+            return resolve(sessionId);
         }
         String csrf = sessionStore.find(sessionId).map(SessionRecord::csrfToken).orElse(null);
         return AuthResult.ok(sessionId, csrf);
     }
 
     /**
-     * 解析会话并校验有效性，失败原因可区分（缺失/已注销/过期）。
+     * 解析会话并校验有效性，失败原因可区分：
+     * <ul>
+     *   <li>无/伪造/已过保留期：SESSION_MISSING（与从未存在不可区分，不泄露任何账号/会话存在性）；</li>
+     *   <li>本人注销或被本人在会话管理中下线：SESSION_REVOKED；</li>
+     *   <li>超并发上限被新登录挤掉：SESSION_CAP_EVICTED；</li>
+     *   <li>自然过期（保留宽限内仍可分辨）：SESSION_EXPIRED。</li>
+     * </ul>
+     * 资源访问与会话续期等入口共用本方法，结论保持一致。
      */
     public AuthResult resolve(String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
@@ -83,11 +91,20 @@ public class AuthService {
         }
         SessionRecord record = found.get();
         if (record.isRevoked()) {
-            return AuthResult.fail(AuthFailureReason.SESSION_REVOKED);
+            AuthFailureReason reason = switch (record.revocationReason()) {
+                case CAP_EVICTED -> AuthFailureReason.SESSION_CAP_EVICTED;
+                // 本人在本会话注销、或本人在会话管理中下线，都属于账号持有人主动撤销。
+                case SELF_LOGOUT, USER_TERMINATED, NONE -> AuthFailureReason.SESSION_REVOKED;
+            };
+            log.info("session inactive: sessionId={}, revocationReason={}, mapped={}",
+                    sessionId, record.revocationReason(), reason);
+            return AuthResult.fail(reason);
         }
         if (record.isExpired(Instant.now())) {
             return AuthResult.fail(AuthFailureReason.SESSION_EXPIRED);
         }
+        // 活跃会话：记录最近一次已认证活动，供会话列表展示。
+        sessionStore.touch(sessionId);
         return AuthResult.ok(record.id(), record.csrfToken());
     }
 

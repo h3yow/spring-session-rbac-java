@@ -65,8 +65,20 @@ class AuthServiceTest {
         authService.logout(sid);
         AuthResult revoked = authService.resolve(sid);
         log.info("after logout: reason={}", revoked.reason());
-        assertEquals(AuthFailureReason.SESSION_MISSING, revoked.reason(),
-                "已注销会话从存储移除，按缺失处理");
+        assertEquals(AuthFailureReason.SESSION_REVOKED, revoked.reason(),
+                "本人主动注销在墓碑保留期内应可分辨为 SESSION_REVOKED");
+
+        // 被并发上限挤掉：carol 登录第 3 个会话（默认 cap=2），最旧会话得到 SESSION_CAP_EVICTED
+        userDirectory.addUser("carol", "carol-pass", java.util.Set.of("USER"));
+        AuthResult first = authService.login("carol", "carol-pass");
+        AuthResult second = authService.login("carol", "carol-pass");
+        AuthResult third = authService.login("carol", "carol-pass");
+        AuthResult capEvicted = authService.resolve(first.sessionId());
+        log.info("after cap eviction: evictedSid={}, reason={}", first.sessionId(), capEvicted.reason());
+        assertEquals(AuthFailureReason.SESSION_CAP_EVICTED, capEvicted.reason(),
+                "被新登录挤掉必须与本人注销/自然过期可区分");
+        assertTrue(second.success());
+        assertTrue(third.success());
 
         // 过期：ttl=0 的会话
         properties.setSessionTtlSeconds(0);
@@ -75,7 +87,8 @@ class AuthServiceTest {
         log.info("expired session: reason={}", expired.reason());
         assertEquals(AuthFailureReason.SESSION_EXPIRED, expired.reason());
 
-        log.info("reasons distinguishable: missing={}, expired={}", missing.reason(), expired.reason());
+        log.info("reasons distinguishable: missing={}, revoked={}, capEvicted={}, expired={}",
+                missing.reason(), revoked.reason(), capEvicted.reason(), expired.reason());
     }
 
     @Test
@@ -118,9 +131,13 @@ class AuthServiceTest {
         for (var f : futures) {
             AuthResult r = assertDoesNotThrow(() -> f.get());
             log.info("post-logout resolve: reason={}", r.reason());
-            assertFalse(r.success(), "注销后并发解析不得成功");
-            assertEquals(AuthFailureReason.SESSION_MISSING, r.reason());
+            assertFalse(r.success(), "注销/被挤后并发解析不得成功");
+            // 竞态下该会话可能在自己注销前已被其他登录挤掉，两种原因都必须可分辨，
+            // 但绝不能是 MISSING（说明会话真实存在过）或成功。
+            assertTrue(r.reason() == AuthFailureReason.SESSION_REVOKED
+                            || r.reason() == AuthFailureReason.SESSION_CAP_EVICTED,
+                    "失效原因必须是本人注销或被挤下线，实际=" + r.reason());
         }
-        assertEquals(0, sessionStore.activeCount("alice"), "竞争结束后状态必须一致、无残留");
+        assertEquals(0, sessionStore.activeCount("alice"), "墓碑不占名额：竞争结束后活跃数必须为 0");
     }
 }

@@ -18,6 +18,8 @@ public class PolicyRegistry {
     public PolicyRegistry() {
         policies.put("/api/user", "USER");
         policies.put("/api/admin", "ADMIN");
+        // 自助会话管理：任意已登录用户，数据范围由 SessionManagementService 限定为本人。
+        policies.put("/api/sessions", "USER");
     }
 
     public void setPolicy(String pathPattern, String requiredRole) {
