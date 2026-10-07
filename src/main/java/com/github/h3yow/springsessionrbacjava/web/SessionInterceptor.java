@@ -4,6 +4,7 @@ import com.github.h3yow.springsessionrbacjava.auth.AuthResult;
 import com.github.h3yow.springsessionrbacjava.auth.AuthService;
 import com.github.h3yow.springsessionrbacjava.rbac.AuthorizationService;
 import com.github.h3yow.springsessionrbacjava.rbac.AuthzDecision;
+import com.github.h3yow.springsessionrbacjava.session.SessionStore;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -12,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 import java.io.IOException;
+import java.time.Instant;
 
 /**
  * 会话解析 + 授权拦截器，作用于 /api/** 受保护资源。
@@ -31,10 +33,13 @@ public class SessionInterceptor implements HandlerInterceptor {
 
     private final AuthService authService;
     private final AuthorizationService authorizationService;
+    private final SessionStore sessionStore;
 
-    public SessionInterceptor(AuthService authService, AuthorizationService authorizationService) {
+    public SessionInterceptor(AuthService authService, AuthorizationService authorizationService,
+                              SessionStore sessionStore) {
         this.authService = authService;
         this.authorizationService = authorizationService;
+        this.sessionStore = sessionStore;
     }
 
     @Override
@@ -59,6 +64,8 @@ public class SessionInterceptor implements HandlerInterceptor {
         }
         request.setAttribute(ATTR_USERNAME, username);
         request.setAttribute(ATTR_SESSION_ID, sessionId);
+        // 认证+授权均通过后刷新最近活动时间，供会话列表展示；终态会话的 touch 为空操作。
+        sessionStore.touch(sessionId, Instant.now());
         return true;
     }
 

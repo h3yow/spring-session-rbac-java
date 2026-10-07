@@ -1,7 +1,9 @@
 package com.github.h3yow.springsessionrbacjava.tests;
 
+import com.github.h3yow.springsessionrbacjava.session.SessionLookup;
 import com.github.h3yow.springsessionrbacjava.session.SessionRecord;
 import com.github.h3yow.springsessionrbacjava.session.SessionStore;
+import com.github.h3yow.springsessionrbacjava.session.TerminationReason;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,8 +30,9 @@ class SessionStoreTest {
         log.info("cap=2, created=[{},{},{}], activeCount={}", s1.id(), s2.id(), s3.id(),
                 store.activeCount("alice"));
         assertEquals(2, store.activeCount("alice"));
-        assertTrue(store.find(s1.id()).isEmpty(), "最旧会话应被淘汰");
-        assertTrue(store.find(s1.id()).map(SessionRecord::isRevoked).orElse(true));
+        assertTrue(store.find(s1.id()).isEmpty(), "最旧会话应被淘汰出活跃表");
+        assertEquals(TerminationReason.CAP_EVICTED,
+                store.lookup(s1.id()).reason(), "被挤掉的会话必须保留 CAP_EVICTED 原因");
         assertTrue(store.find(s2.id()).isPresent());
         assertTrue(store.find(s3.id()).isPresent());
     }
@@ -40,16 +43,18 @@ class SessionStoreTest {
         SessionRecord s = store.create("alice", 0, 2); // ttl=0 立即过期
         log.info("ttl=0, expired={}", s.isExpired(java.time.Instant.now()));
         assertEquals(0, store.activeCount("alice"));
-        assertFalse(store.renew(s.id(), 3600), "过期会话不得续期复活");
+        SessionLookup renew = store.renew(s.id(), 3600);
+        assertEquals(SessionLookup.State.TERMINATED, renew.state(), "过期会话不得续期复活");
+        assertEquals(TerminationReason.EXPIRED, renew.reason());
     }
 
     @Test
     void renewExtendsLivingSession() {
         SessionStore store = new SessionStore();
         SessionRecord s = store.create("alice", 3600, 2);
-        assertTrue(store.renew(s.id(), 7200));
+        assertEquals(SessionLookup.State.ACTIVE, store.renew(s.id(), 7200).state());
         log.info("renew ok, newExpiry={}", store.find(s.id()).orElseThrow().expiresAt());
-        assertFalse(store.renew("nonexistent", 7200));
+        assertEquals(SessionLookup.State.UNKNOWN, store.renew("nonexistent", 7200).state());
     }
 
     @Test
@@ -58,7 +63,10 @@ class SessionStoreTest {
         SessionRecord s = store.create("alice", 3600, 2);
         assertTrue(store.revoke(s.id()));
         assertFalse(store.revoke(s.id()), "重复注销返回稳定结果");
-        assertFalse(store.renew(s.id(), 3600), "已注销会话不得续期");
+        assertEquals(SessionLookup.State.TERMINATED, store.renew(s.id(), 3600).state(),
+                "已注销会话不得续期");
+        assertEquals(TerminationReason.LOGOUT, store.lookup(s.id()).reason(),
+                "主动注销必须保留 LOGOUT 原因");
         log.info("revoke idempotent ok, sessionId={}", s.id());
     }
 

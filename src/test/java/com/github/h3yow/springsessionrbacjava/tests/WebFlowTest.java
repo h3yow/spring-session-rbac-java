@@ -80,7 +80,8 @@ class WebFlowTest {
                 .andExpect(status().isUnauthorized())
                 .andReturn();
         log.info("after logout: body={}", after.getResponse().getContentAsString());
-        assertTrue(after.getResponse().getContentAsString().contains("SESSION_MISSING"));
+        assertTrue(after.getResponse().getContentAsString().contains("SESSION_REVOKED"),
+                "本人注销后旧会话应得到 SESSION_REVOKED，区别于不存在的 SESSION_MISSING");
     }
 
     @Test

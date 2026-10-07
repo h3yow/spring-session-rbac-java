@@ -65,8 +65,11 @@ class AuthServiceTest {
         authService.logout(sid);
         AuthResult revoked = authService.resolve(sid);
         log.info("after logout: reason={}", revoked.reason());
-        assertEquals(AuthFailureReason.SESSION_MISSING, revoked.reason(),
-                "已注销会话从存储移除，按缺失处理");
+        assertEquals(AuthFailureReason.SESSION_REVOKED, revoked.reason(),
+                "本人主动注销后旧会话再访问应得到 SESSION_REVOKED（与不存在的 SESSION_MISSING 区分）");
+        AuthResult forged = authService.resolve("forged-session-id");
+        assertEquals(AuthFailureReason.SESSION_MISSING, forged.reason(),
+                "不存在/伪造会话必须保持 SESSION_MISSING，不泄露存在性");
 
         // 过期：ttl=0 的会话
         properties.setSessionTtlSeconds(0);
@@ -108,7 +111,7 @@ class AuthServiceTest {
             futures.add(pool.submit(() -> {
                 start.await();
                 AuthResult r = authService.login("alice", "alice-pass");
-                authService.logout(r.sessionId()); // 立即注销自己的会话
+                authService.logout(r.sessionId()); // 尝试立即注销自己的会话（可能已先被上限挤掉）
                 return authService.resolve(r.sessionId());
             }));
         }
@@ -118,8 +121,12 @@ class AuthServiceTest {
         for (var f : futures) {
             AuthResult r = assertDoesNotThrow(() -> f.get());
             log.info("post-logout resolve: reason={}", r.reason());
-            assertFalse(r.success(), "注销后并发解析不得成功");
-            assertEquals(AuthFailureReason.SESSION_MISSING, r.reason());
+            assertFalse(r.success(), "注销/挤掉后并发解析不得成功");
+            // 终态原因必须准确：本人完成注销→REVOKED；注销前已被新登录挤掉→CAP_EVICTED。
+            // 先发生的终止保留原因，后到的注销不得改写结论。
+            assertTrue(r.reason() == AuthFailureReason.SESSION_REVOKED
+                            || r.reason() == AuthFailureReason.SESSION_CAP_EVICTED,
+                    "终态原因必须是 REVOKED 或 CAP_EVICTED，实际=" + r.reason());
         }
         assertEquals(0, sessionStore.activeCount("alice"), "竞争结束后状态必须一致、无残留");
     }

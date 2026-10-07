@@ -1,14 +1,13 @@
 package com.github.h3yow.springsessionrbacjava.auth;
 
 import com.github.h3yow.springsessionrbacjava.config.SecurityProperties;
+import com.github.h3yow.springsessionrbacjava.session.SessionLookup;
 import com.github.h3yow.springsessionrbacjava.session.SessionRecord;
 import com.github.h3yow.springsessionrbacjava.session.SessionStore;
+import com.github.h3yow.springsessionrbacjava.session.TerminationReason;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-
-import java.time.Instant;
-import java.util.Optional;
 
 /**
  * 认证服务：登录（每次签发全新会话 ID，防会话固定）、注销、续期、会话解析。
@@ -57,38 +56,44 @@ public class AuthService {
     }
 
     public AuthResult renew(String sessionId) {
-        AuthResult resolved = resolve(sessionId);
-        if (!resolved.success()) {
-            return resolved;
-        }
-        boolean renewed = sessionStore.renew(sessionId, properties.getSessionTtlSeconds());
-        if (!renewed) {
-            // 并发下会话刚被注销或过期：回滚到一致状态，报稳定错误。
-            return AuthResult.fail(AuthFailureReason.SESSION_REVOKED);
-        }
-        String csrf = sessionStore.find(sessionId).map(SessionRecord::csrfToken).orElse(null);
-        return AuthResult.ok(sessionId, csrf);
+        SessionLookup lookup = sessionStore.renew(sessionId, properties.getSessionTtlSeconds());
+        return switch (lookup.state()) {
+            case ACTIVE -> {
+                log.info("renew success: sessionId={}", sessionId);
+                yield AuthResult.ok(sessionId, lookup.record().csrfToken());
+            }
+            case TERMINATED -> AuthResult.fail(toFailureReason(lookup.reason()));
+            case UNKNOWN -> AuthResult.fail(AuthFailureReason.SESSION_MISSING);
+        };
     }
 
     /**
-     * 解析会话并校验有效性，失败原因可区分（缺失/已注销/过期）。
+     * 解析会话并校验有效性，失败原因可区分：
+     * 缺失（不存在/伪造）/ 主动注销（SESSION_REVOKED）/ 被挤掉（SESSION_CAP_EVICTED）/
+     * 自然过期（SESSION_EXPIRED）。资源访问、续期、会话管理各入口结论一致。
      */
     public AuthResult resolve(String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
             return AuthResult.fail(AuthFailureReason.SESSION_MISSING);
         }
-        Optional<SessionRecord> found = sessionStore.find(sessionId);
-        if (found.isEmpty()) {
-            return AuthResult.fail(AuthFailureReason.SESSION_MISSING);
-        }
-        SessionRecord record = found.get();
-        if (record.isRevoked()) {
-            return AuthResult.fail(AuthFailureReason.SESSION_REVOKED);
-        }
-        if (record.isExpired(Instant.now())) {
-            return AuthResult.fail(AuthFailureReason.SESSION_EXPIRED);
-        }
-        return AuthResult.ok(record.id(), record.csrfToken());
+        SessionLookup lookup = sessionStore.lookup(sessionId);
+        return switch (lookup.state()) {
+            case ACTIVE -> AuthResult.ok(lookup.record().id(), lookup.record().csrfToken());
+            case TERMINATED -> {
+                AuthFailureReason reason = toFailureReason(lookup.reason());
+                log.info("resolve terminated session: sessionId={}, reason={}", sessionId, reason);
+                yield AuthResult.fail(reason);
+            }
+            case UNKNOWN -> AuthResult.fail(AuthFailureReason.SESSION_MISSING);
+        };
+    }
+
+    static AuthFailureReason toFailureReason(TerminationReason reason) {
+        return switch (reason) {
+            case LOGOUT -> AuthFailureReason.SESSION_REVOKED;
+            case CAP_EVICTED -> AuthFailureReason.SESSION_CAP_EVICTED;
+            case EXPIRED -> AuthFailureReason.SESSION_EXPIRED;
+        };
     }
 
     public String usernameOf(String sessionId) {
